@@ -24,6 +24,11 @@ import {
 	GutterMarker,
 } from "@codemirror/view";
 
+function assert_not_null<T>(val: T): asserts val is NonNullable<T> {
+	if (val === undefined || val === null)
+		throw new Error("not null assertion error");
+}
+
 const dragHighlight = Decoration.line({ attributes: { class: "drag-over" } });
 const dragDestination = Decoration.line({ attributes: { class: "drag-last" } });
 const dragParentDestination = Decoration.line({
@@ -40,10 +45,12 @@ function findListItem(
 	text: string,
 	line: number,
 	itemType: "listItem" | "paragraph"
-): RemarkNode {
+): RemarkNode | undefined {
 	const ast = unified().use(remarkParse).parse(text);
 	const allItems: RemarkNode[] = [];
 	visit(ast, itemType, (node, index, parent) => {
+		assert_not_null(node.position);
+		assert_not_null(parent);
 		const start = node.position.start.line;
 		const end = node.position.end.line;
 		if (start <= line && end >= line)
@@ -76,6 +83,7 @@ const dragHandle = (line: number, app: App) =>
 			drag.className = "dnd-gutter-marker";
 			drag.setAttribute("draggable", "true");
 			drag.addEventListener("dragstart", (e) => {
+				assert_not_null(e.dataTransfer);
 				e.dataTransfer.setData("line", `${line}`);
 			});
 			return drag;
@@ -115,15 +123,16 @@ function findSection(section: ListItemCache | SectionCache, line: number) {
 }
 
 function getBlock(line: number, fileCache: CachedMetadata) {
-	const block: ListItemCache | SectionCache = _.concat(
+	const block: ListItemCache | SectionCache | undefined = _.concat(
 		[],
-		fileCache?.listItems
-	).find((s) => findSection(s, line));
+		fileCache.listItems
+	).find((s) => s && findSection(s, line));
 	if (!block) return;
 
 	// generate and write block id
 	const id = generateId();
 
+	assert_not_null(fileCache.listItems);
 	const allChildren = _.uniq(
 		getAllChildrensOfBlock([block], fileCache.listItems)
 	);
@@ -132,9 +141,10 @@ function getBlock(line: number, fileCache: CachedMetadata) {
 		from: block.position.end.offset,
 		insert: " ^" + id,
 	};
-	const fromLine = _.minBy(allChildren, "position.start.line").position.start;
-	const toLine = _.maxBy(allChildren, "position.end.line").position.end;
-
+	const fromLine = _.minBy(allChildren, "position.start.line")?.position.start;
+	assert_not_null(fromLine);
+	const toLine = _.maxBy(allChildren, "position.end.line")?.position.end;
+	assert_not_null(toLine);
 	return {
 		...block,
 		fromLine,
@@ -165,6 +175,7 @@ function processDrop(
 	dropMode: "current" | "parent",
 	targetEditor: EditorView
 ) {
+	assert_not_null(event.dataTransfer);
 	const sourceLineNum = parseInt(event.dataTransfer.getData("line"), 10);
 	// @ts-ignore
 	const targetLinePos = event.target.cmView.posAtStart;
@@ -187,6 +198,7 @@ function processDrop(
 	const text = view.editor.getValue();
 	const item = findListItem(text, sourceLineNum, "listItem");
 	if (item) {
+		assert_not_null(item.node.position);
 		const from = item.node.position.start.offset;
 		const to = item.node.position.end.offset;
 		let operations;
@@ -213,13 +225,17 @@ function processDrop(
 			targetItem?.node?.position?.end?.offset || targetLine.to;
 
 		if (type === "move" || type === "copy") {
+			assert_not_null(from);
 			const sourceLine = sourceEditor.state.doc.lineAt(from);
 
 			const textToInsert = "\n" + text.slice(sourceLine.from, to);
 
 			// adjust indent for each line of the source block
-			const computeIndent = (line: Line) =>
-				line.text.match(/^\t*/)[0].length;
+			const computeIndent = (line: Line) => {
+				let m = line.text.match(/^\t*/);
+				assert_not_null(m);
+				return m[0].length;
+			}
 
 			const sourceIndent = computeIndent(sourceLine);
 			const targetIndent = computeIndent(targetLine);
@@ -255,7 +271,10 @@ function processDrop(
 			};
 		} else if (type === "embed") {
 			const sourceFile = findFile(app, sourceEditor);
-			const { id, changes } = getBlock(sourceLineNum - 1, sourceFile);
+			assert_not_null(sourceFile);
+			const b = getBlock(sourceLineNum - 1, sourceFile);
+			assert_not_null(b);
+			const { id, changes } = b;
 			const insertBlockOp = {
 				from: targetItemLastLine,
 				insert: ` ![[${view.file.basename}#^${id}]]`,
@@ -265,6 +284,7 @@ function processDrop(
 		}
 
 		console.log("Move item ", { dropMode, type }, operations);
+		assert_not_null(operations);
 		const { source, target } = operations;
 		if (sourceEditor == targetEditor)
 			sourceEditor.dispatch({ changes: [...source, ...target] });
@@ -301,7 +321,9 @@ function getBlockForLine(
 	lineNumber: number,
 	targetEditor: EditorView
 ) {
-	return getBlock(lineNumber, findFile(app, targetEditor));
+	const file = findFile(app, targetEditor);
+	assert_not_null(file);
+	return getBlock(lineNumber, file);
 }
 
 type LineOfEditor = {
@@ -315,7 +337,7 @@ function getAllLinesForCurrentItem(
 	lineNumber: number,
 	targetEditor: EditorView,
 	targetLine?: number
-): LineOfEditor[] {
+): LineOfEditor[] | undefined {
 	const doc = targetEditor.state.doc;
 	const block = getBlockForLine(app, lineNumber, targetEditor);
 	if (!block) return;
@@ -357,7 +379,9 @@ function buildLineDecorations(
 function highlightWholeItem(app: App, target: Element, editor: EditorView) {
 	try {
 		// get all sub-items for current line
-		const line = DOMtoLine(target.closest(".cm-line"), editor);
+		const elem = target.closest(".cm-line");
+		assert_not_null(elem);
+		const line = DOMtoLine(elem, editor);
 		const currentLines = getAllLinesForCurrentItem(app, line, editor);
 
 		// get all sub-items for parent line
@@ -371,14 +395,15 @@ function highlightWholeItem(app: App, target: Element, editor: EditorView) {
 					line + 1
 				)
 				: currentLines;
-
+		assert_not_null(currentLines);
+		assert_not_null(parentLines);
 		lineHightlight = {
 			current: buildLineDecorations(currentLines, dragDestination),
 			parent: buildLineDecorations(parentLines, dragParentDestination),
 		};
 
 		editor.dispatch({});
-	} catch (e) {
+	} catch (e: any) {
 		if (
 			e.message.match(
 				/Trying to find position for a DOM position outside of the document/
@@ -419,7 +444,7 @@ const processDragOver = (element: HTMLElement, offsetX: number) => {
 };
 
 export default class DragNDropPlugin extends Plugin {
-	settings: DndPluginSettings;
+	settings: DndPluginSettings | undefined;
 
 	async onload() {
 		const app = this.app;
@@ -457,6 +482,7 @@ export default class DragNDropPlugin extends Plugin {
 			DEFAULT_SETTINGS,
 			await this.loadData()
 		);
+		assert_not_null(this.settings);
 		return this.settings;
 	}
 
@@ -489,9 +515,11 @@ class DragNDropSettings extends PluginSettingTab {
 					dropDown.addOption("embed", "Embed link");
 					dropDown.addOption("copy", "Copy block");
 					dropDown.addOption("move", "Move block");
+					assert_not_null(this.plugin.settings);
 					dropDown.setValue(this.plugin.settings[settingName]);
-					dropDown.onChange(async (value: OperationType) => {
-						this.plugin.settings[settingName] = value;
+					dropDown.onChange(async (value: string) => {
+						assert_not_null(this.plugin.settings);
+						this.plugin.settings[settingName] = value as OperationType;
 						await this.plugin.saveSettings();
 					});
 				};
